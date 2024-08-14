@@ -193,7 +193,7 @@ def make_span_at_origin(fp, sketch):
 
     sketch.deleteAllGeometry()
     dims = get_span_dimensions(float(fp.Radius), float(fp.PyramidHeight))
-    print(dims)
+    # print(dims)
     tanArcDist = fp.TanArcDist
     deepArcDist = fp.OtherArcDist
 
@@ -277,7 +277,7 @@ class DodecaThing:
             "App::PropertyLength",
             "OtherArcDist",
             "SpanDims",
-            "Distnace between the edge and the start of the other arc",
+            "Distance between the edge and the start of the other arc",
         ).OtherArcDist = 12.0
         obj.addProperty(
             "App::PropertyLength", "SpanCenterSpace", "SpanDims", "Thickness of the span's center"
@@ -292,49 +292,179 @@ class DodecaThing:
             "App::PropertyLength", "Tolerance", "Printing", "Width of the dovetail at the smallest point"
         ).Tolerance = 0.2
 
-        obj.addExtension("App::GroupExtensionPython")
+        sk2 = App.ActiveDocument.addObject("Sketcher::SketchObjectPython", "DoDecaThingSketch")
 
-        sketchObj = obj.newObject("Sketcher::SketchObjectPython", "pysk")
-        sketchObj.Visibility = False
+        # This is slightly counterintuitive
+        #
+        # If you add App::GroupExtensionPython to obj and add new objects to the group you're
+        # telling FreeCAD that obj is being built out of the objects in the group rather than
+        # the objects in the group being built out of obj
+        #
+        # Instead, add the PropertyLink property to the sketch object and then add obj to the sketch's
+        # link. That causes the sketch to be in obj's InList and when DodecaThing execute runs
+        # and updates the sketch the document's dependency chains evaluate correctly and prevents the
+        # "still touched after recompute" issue
+        #
+        # However, having a lot of ungrouped generated objects is annoying so the editor display is
+        # tidied up by the View claiming any children which have a SourceDodecaThing link which is
+        # pointing to obj.
+        #
+        # This general pattern is used for all generated objects
+
+        sk2.addProperty("App::PropertyLink", "SourceDodecaThing").SourceDodecaThing = obj
+
+        # tag the new sketch so that it can be found obj's InList
+        sk2.addProperty("App::PropertyBool", "DodecaThingSketchObject").DodecaThingSketchObject = True
+        sk2.setEditorMode("DodecaThingSketchObject", ("ReadOnly", "Hidden"))
+
         self.update_sketch(obj)
 
+    def loads(self, state):
+        # nothing should get serialized here
+        return None
+
+    def dumps(self):
+        # nothing in this class should get serialized
+        return None
+
     def onDocumentRestored(self, obj):
-        if hasattr(obj, "Group"):
-            for g in obj.Group:
-                if g.isDerivedFrom("Sketcher::SketchObjectPython"):
-                    g.Visibility = False
+        pass
 
     def onChanged(self, fp, prop):
-        if prop in sketchParams:
-            self.update_sketch(fp)
+        pass
 
     def execute(self, fp):
-        # updating the sketch here produces a loop where the scripted object and sketch oscillate as needing an update
-        # that probably indicates that the code needs to be restructured
+        self.update_sketch(fp)
 
-        spans = self.make_spans(fp)
-        corners = self.make_corners(fp)
-        dodecahedron = [Part.Shell(make_dodecahedron_faces(fp.Radius))] if fp.MakeDodecahedron else []
-        fp.Shape = Part.Compound(spans + corners + dodecahedron)
+        if fp.MakeAllSpans:
+            DodecaThing.place_all_spans(fp)
+        else:
+            DodecaThing.place_single_span(fp)
 
-    def update_sketch(self, fp):
-        sketch = self.get_sketch(fp)
+        if fp.MakeAllCorners:
+            DodecaThing.place_all_corners(fp)
+        else:
+            DodecaThing.place_single_corner(fp)
+
+        # corners = DodecaThing.make_corners(fp)
+
+        if fp.MakeDodecahedron:
+            ddo = DodecaThing.get_dodecahedron_feature(fp)
+            ddo.Shape = Part.Solid(Part.Shell(make_dodecahedron_faces(fp.Radius)))
+        else:
+            DodecaThing.remove_dodecahedron_feature(fp)
+
+        # fp.Shape = Part.Compound(corners)
+
+    @staticmethod
+    def update_sketch(fp):
+        sketch = DodecaThing.get_sketch(fp)
         if sketch:
             make_span_at_origin(fp, sketch)
 
-    def get_sketch(self, fp):
-        if hasattr(fp, "Group"):
-            for g in fp.Group:
-                if g.isDerivedFrom("Sketcher::SketchObjectPython"):
-                    return g
+    @staticmethod
+    def get_sketch(fp):
+        if hasattr(fp, "InList"):
+            for obj in fp.InList:
+                if hasattr(obj, "DodecaThingSketchObject"):
+                    return obj
+
         return None
 
-    def make_spans(self, fp):
-        sketchObj = self.get_sketch(fp)
+    @staticmethod
+    def get_dodecahedron_feature(fp):
+        if hasattr(fp, "InList"):
+            for obj in fp.InList:
+                if hasattr(obj, "DodecaThingEnclosingDDG"):
+                    if obj.SourceDodecaThing == fp:
+                        return obj
+
+        obj = fp.Document.addObject("Part::Feature", "Dodecahedron")
+        obj.addProperty("App::PropertyLink", "SourceDodecaThing").SourceDodecaThing = fp
+        obj.addProperty("App::PropertyBool", "DodecaThingEnclosingDDG").DodecaThingEnclosingDDG = True
+        obj.setEditorMode("DodecaThingEnclosingDDG", ("ReadOnly", "Hidden"))
+
+        # the hierarchy fails to update sometimes if fp isn't touched after adding a new feature
+        fp.touch()
+        return obj
+
+    @staticmethod
+    def remove_dodecahedron_feature(fp):
+        if hasattr(fp, "InList"):
+            for obj in fp.InList:
+                if hasattr(obj, "DodecaThingEnclosingDDG"):
+                    obj.Document.removeObject(obj.Name)
+
+    @staticmethod
+    def get_corner_feature(fp, corner_index: int):
+        if corner_index < 0:
+            raise ValueError("Expected a non negative integer for span index")
+
+        if hasattr(fp, "InList"):
+            for obj in fp.InList:
+                if hasattr(obj, "DodecaThingCornerIndex"):
+                    if obj.DodecaThingCornerIndex == corner_index:
+                        return obj
+
+        obj = fp.Document.addObject("Part::Feature", "Corner000")
+        obj.addProperty("App::PropertyLink", "SourceDodecaThing").SourceDodecaThing = fp
+        obj.addProperty("App::PropertyInteger", "DodecaThingCornerIndex").DodecaThingCornerIndex = corner_index
+        obj.setEditorMode("DodecaThingCornerIndex", ("ReadOnly", "Hidden"))
+
+        # the hierarchy fails to update sometimes if fp isn't touched after adding a new feature
+        fp.touch()
+        return obj
+
+    @staticmethod
+    def remove_corners_above_index(fp, corner_index: int):
+        objsToRemove = []
+        if hasattr(fp, "InList"):
+            for obj in fp.InList:
+                if hasattr(obj, "DodecaThingCornerIndex"):
+                    if obj.DodecaThingCornerIndex > corner_index:
+                        objsToRemove.append(obj.Name)
+
+        for objName in objsToRemove:
+            fp.Document.removeObject(objName)
+
+    @staticmethod
+    def get_span_feature(fp, span_index: int):
+        if span_index < 0:
+            raise ValueError("Expected a non negative integer for span index")
+
+        if hasattr(fp, "InList"):
+            for obj in fp.InList:
+                if hasattr(obj, "DodecaThingSpanIndex"):
+                    if obj.DodecaThingSpanIndex == span_index:
+                        return obj
+
+        obj = fp.Document.addObject("Part::Feature", "Span000")
+        obj.addProperty("App::PropertyLink", "SourceDodecaThing").SourceDodecaThing = fp
+        obj.addProperty("App::PropertyInteger", "DodecaThingSpanIndex").DodecaThingSpanIndex = span_index
+        obj.setEditorMode("DodecaThingSpanIndex", ("ReadOnly", "Hidden"))
+
+        # the hierarchy fails to update sometimes if fp isn't touched after adding a new feature
+        fp.touch()
+        return obj
+
+    @staticmethod
+    def remove_spans_above_index(fp, span_index: int):
+        objsToRemove = []
+        if hasattr(fp, "InList"):
+            for obj in fp.InList:
+                if hasattr(obj, "DodecaThingSpanIndex"):
+                    if obj.DodecaThingSpanIndex > span_index:
+                        objsToRemove.append(obj.Name)
+
+        for objName in objsToRemove:
+            fp.Document.removeObject(objName)
+
+    @staticmethod
+    def make_span(fp):
         shapes = []
 
-        if sketchObj:
-            for w in sketchObj.Shape.Wires:
+        if sketch_obj := DodecaThing.get_sketch(fp):
+            for w in sketch_obj.Shape.Wires:
                 f = Part.Face(w)
                 shapes.append(f.extrude(Vector(0, 0, -fp.SpanThick)))
 
@@ -353,14 +483,22 @@ class DodecaThing:
         working_shape = working_shape.cut(cutters)
         working_shape = working_shape.removeSplitter()
 
-        if not fp.MakeAllSpans:
-            return [working_shape]
+        return Part.Solid(working_shape)
 
+    @staticmethod
+    def place_single_span(fp):
+        shape = DodecaThing.make_span(fp)
+        span = DodecaThing.get_span_feature(fp, 0)
+        span.Shape = shape
+        DodecaThing.remove_spans_above_index(fp, 0)
+
+    @staticmethod
+    def place_all_spans(fp):
+        shape = DodecaThing.make_span(fp)
         decaFaces = make_dodecahedron_faces(float(fp.Radius))
         faces = get_opposing_faces(decaFaces)
-        allShapes = []
 
-        for face in faces:
+        for span_index, face in enumerate(faces):
             m, n = face
             v1 = decaFaces[m].CenterOfMass
             v2 = decaFaces[n].CenterOfMass
@@ -371,11 +509,11 @@ class DodecaThing:
 
             vLeft = v12norm.cross(norm_m).normalize()
             m = transform_matrix_from_xy_basis(v12norm, vLeft, v1)
-            allShapes.append(working_shape.transformed(m))
+            span = DodecaThing.get_span_feature(fp, span_index)
+            span.Shape = shape.transformed(m)
 
-        return allShapes
-
-    def make_corners(self, fp):
+    @staticmethod
+    def make_corner(fp):
         peak = Vector(0, 0, 0)
 
         # edge angle is defined by
@@ -435,13 +573,13 @@ class DodecaThing:
         polyB = Part.makePolygon(bottom_points, True)
         loft = Part.makeLoft([polyA, polyB], True)
 
-        # fuse in the aditional material
+        # fuse in the additional material
         shape = shape.fuse(loft)
 
         # and now dovetails
-        widthVec = face1_right_vector * (float(fp.DoveWidth) * 0.5)
-        lengthVec = face1_up_vector * float(fp.DoveLength)
-        dt_shape = make_dovetail_shape(face1_midpoint, widthVec, lengthVec, -float(fp.SpanThick), extra_base=1)
+        width_vector = face1_right_vector * (float(fp.DoveWidth) * 0.5)
+        length_vector = face1_up_vector * float(fp.DoveLength)
+        dt_shape = make_dovetail_shape(face1_midpoint, width_vector, length_vector, -float(fp.SpanThick), extra_base=1)
 
         # one cutter for each side
         cutters = [
@@ -449,21 +587,26 @@ class DodecaThing:
             for theta in np.linspace(0, 2 * np.pi, 5, False)
         ]
         shape = shape.cut(cutters)
+        return Part.Solid(shape)
 
-        # shape's all done at this point
-        # the code here replicates the shape and moves it to the correct locations
-        if not fp.MakeAllCorners:
-            return [shape]
+    @staticmethod
+    def place_single_corner(fp):
+        shape = DodecaThing.make_corner(fp)
+        corner = DodecaThing.get_corner_feature(fp, 0)
+        corner.Shape = shape
+        DodecaThing.remove_corners_above_index(fp, 0)
 
+    @staticmethod
+    def place_all_corners(fp):
+        shape = DodecaThing.make_corner(fp)
         deca_faces = make_dodecahedron_faces(float(fp.Radius))
         faces = get_opposing_faces(deca_faces)
-        allShapes = []
 
         done_faces = set()
-
         for face in faces:
             m, n = face
             if m not in done_faces:
+                corner_index = len(done_faces)
                 done_faces.add(m)
                 norm = deca_faces[m].normalAt(0, 0)
                 v1 = deca_faces[m].CenterOfMass
@@ -473,9 +616,11 @@ class DodecaThing:
                 v_left = v12norm.cross(norm).normalize()
 
                 xfrm = transform_matrix_from_yz_basis(-v_left, -norm, v1)
-                allShapes.append(shape.transformed(xfrm))
+                corner = DodecaThing.get_corner_feature(fp, corner_index)
+                corner.Shape = shape.transformed(xfrm)
 
             if n not in done_faces:
+                corner_index = len(done_faces)
                 done_faces.add(n)
                 norm = deca_faces[n].normalAt(0, 0)
                 v1 = deca_faces[n].CenterOfMass
@@ -485,9 +630,8 @@ class DodecaThing:
                 v_left = v12norm.cross(norm).normalize()
 
                 xfrm = transform_matrix_from_yz_basis(-v_left, -norm, v1)
-                allShapes.append(shape.transformed(xfrm))
-
-        return allShapes
+                corner = DodecaThing.get_corner_feature(fp, corner_index)
+                corner.Shape = shape.transformed(xfrm)
 
 
 class ViewThing:
@@ -497,18 +641,21 @@ class ViewThing:
 
     def attach(self, viewObject):
         """Setup the scene sub-graph of the view provider, this method is mandatory"""
-        print(f"\nAttach {self} -> {viewObject}")
+        # print(f"\nAttach {self} -> {viewObject}")
         self.viewObject = viewObject
         self.object = viewObject.Object
         return
 
     def claimChildren(self):
+        controlled_objects = []
+        for obj in self.object.InList:
+            if hasattr(obj, "SourceDodecaThing") and obj.SourceDodecaThing == self.object:
+                controlled_objects.append(obj)
+            else:
+                print(f"claim children rejecting object {obj}")
 
-        if hasattr(self, "object") and hasattr(self.object, "Group"):
-            # print(f"Claim children {self} {self.object} {self.object.Group}")
-            return self.object.Group
-        print(f"ClaimChildren no kids {self}")
-        return []
+        # also consider: return controlled_objects + self.object.OutList
+        return controlled_objects
 
     def dumps(self):
         return None
@@ -526,10 +673,6 @@ class ViewThing:
         modes = []
         return modes
 
-    def getDefaultDisplayMode(self):
-        """Return the name of the default display mode. It must be defined in getDisplayModes."""
-        return "Shaded"
-
     def setDisplayMode(self, mode):
         """Map the display mode defined in attach with those defined in getDisplayModes.
         Since they have the same names nothing needs to be done. This method is optional.
@@ -538,7 +681,8 @@ class ViewThing:
 
     def onChanged(self, vp, prop):
         """Print the name of the property that has changed"""
-        App.Console.PrintMessage("Change property: " + str(prop) + "\n")
+        # App.Console.PrintMessage("Change property: " + str(prop) + "\n")
+        pass
 
     def getIcon(self):
         """Return the icon in XMP format which will appear in the tree view. This method is optional
