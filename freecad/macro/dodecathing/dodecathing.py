@@ -69,12 +69,12 @@ def transform_matrix_from_xy_basis(xAxis: Vector, yAxis: Vector, xyzTranslate: V
     """
     reminder: if xAxis is forward then yAxis is to the LEFT
     """
-    verySmallNumber = 10 * App.Base.Precision.confusion()
+    very_small_number = 10 * App.Base.Precision.confusion()
     xAxis = Vector(xAxis).normalize()
     yAxis = Vector(yAxis).normalize()
     zAxis = xAxis.cross(yAxis).normalize()
 
-    if abs(xAxis.dot(yAxis)) > verySmallNumber:
+    if abs(xAxis.dot(yAxis)) > very_small_number:
         xAxis = yAxis.cross(zAxis)
         print("Provided axes are not orthogonal. Regenerating x axis as {xAxis}")
 
@@ -85,20 +85,20 @@ def transform_matrix_from_yz_basis(yAxis: Vector, zAxis: Vector, xyzTranslate: V
     """
     reminder: if xAxis is forward then yAxis is to the LEFT
     """
-    verySmallNumber = 10 * App.Base.Precision.confusion()
+    very_small_number = 10 * App.Base.Precision.confusion()
 
     yAxis = Vector(yAxis).normalize()
     zAxis = Vector(zAxis).normalize()
     xAxis = -zAxis.cross(yAxis).normalize()
 
-    if abs(zAxis.dot(yAxis)) > verySmallNumber:
+    if abs(zAxis.dot(yAxis)) > very_small_number:
         zAxis = -yAxis.cross(xAxis)
         print("Provided axes are not orthogonal. Regenerating z axis as {zAxis}")
 
     return Matrix(xAxis, yAxis, zAxis, xyzTranslate)
 
 
-def get_span_dimensions(radius: float, pyramidHeight: float):
+def get_span_dimensions(radius: float, pyramid_height: float):
     deca_faces = make_dodecahedron_faces(radius)
     fcs = get_opposing_faces(deca_faces)
     m, n = fcs[0]
@@ -120,7 +120,7 @@ def get_span_dimensions(radius: float, pyramidHeight: float):
     # this face is an an angle to that vector, get the ratio between the vectors
     face_to_pyramid_ratio = abs(norm_m.dot(v12norm))
 
-    edgeXOffset = pyramidHeight / face_to_pyramid_ratio
+    edgeXOffset = pyramid_height / face_to_pyramid_ratio
     edgeYOffset = edgeXOffset * x_to_y_ratio
     middleYOffset = 0.5 * length * x_to_y_ratio
 
@@ -144,7 +144,7 @@ def make_face_cutter(v0, vSide, vDown, cutterLength, cutterTolerance):
 def make_cutter_set(fp):
     dims = get_span_dimensions(float(fp.Radius), float(fp.PyramidHeight))
     cutterLength = float(dims["length"] * 0.5)
-    cutterTolerance = 0.1
+    cutterTolerance = fp.Tolerance * 0.5
 
     v1Base = Vector(np.cos(kFaceToBaseAngleRad), 0, -np.sin(kFaceToBaseAngleRad))
     v2Base = Vector(-np.cos(kFaceToBaseAngleRad), 0, -np.sin(kFaceToBaseAngleRad))
@@ -266,6 +266,14 @@ class DodecaThing:
 
         obj.addProperty("App::PropertyLength", "Radius", "Dims", "Radius of the dodecahedron").Radius = 100.0
         obj.addProperty("App::PropertyLength", "PyramidHeight", "Dims", "Height of the pyramids").PyramidHeight = 25
+
+        obj.addProperty(
+            "App::PropertyLength", "SpanEdge1", "Decorative", "First edge thickness for the span"
+        ).SpanEdge1 = 0.4
+        obj.addProperty(
+            "App::PropertyLength", "SpanEdge2", "Decorative", "Second edge thickness for the span"
+        ).SpanEdge2 = 3
+
         obj.addProperty("App::PropertyLength", "SpanThick", "SpanDims", "Thickness of the spans").SpanThick = 4.0
         obj.addProperty(
             "App::PropertyLength",
@@ -286,7 +294,7 @@ class DodecaThing:
         obj.addProperty("App::PropertyLength", "DoveLength", "Dovetail", "Length of the dovetail").DoveLength = 6.0
         obj.addProperty(
             "App::PropertyLength", "DoveWidth", "Dovetail", "Width of the dovetail at the smallest point"
-        ).DoveWidth = 6.0
+        ).DoveWidth = 8.0
 
         obj.addProperty(
             "App::PropertyLength", "Tolerance", "Printing", "Width of the dovetail at the smallest point"
@@ -346,15 +354,11 @@ class DodecaThing:
         else:
             DodecaThing.place_single_corner(fp)
 
-        # corners = DodecaThing.make_corners(fp)
-
         if fp.MakeDodecahedron:
             ddo = DodecaThing.get_dodecahedron_feature(fp)
             ddo.Shape = Part.Solid(Part.Shell(make_dodecahedron_faces(fp.Radius)))
         else:
             DodecaThing.remove_dodecahedron_feature(fp)
-
-        # fp.Shape = Part.Compound(corners)
 
     @staticmethod
     def update_sketch(fp):
@@ -482,6 +486,54 @@ class DodecaThing:
         cutters = make_cutter_set(fp)
         working_shape = working_shape.cut(cutters)
         working_shape = working_shape.removeSplitter()
+
+        up_faces = [f for f in working_shape.Faces if f.normalAt(0, 0).z > 0.99]
+        if up_faces:
+            if len(up_faces) > 1:
+                print("Unexpected number of upward facing faces. Insetting may not work as expected")
+            f = up_faces[0]
+            w = f.OuterWire
+
+            w.fix(1e-4, 1e-4, 1e-4)
+
+            # make the decorative edge. This makes it easy to outline the shape with a different color
+            if fp.SpanEdge1 > 0:
+                valid_cutters = []
+                edge_thickness = float(fp.SpanEdge1)
+                offset1 = (-edge_thickness) - 0.1
+                offset2 = -edge_thickness
+                inset = w.makeOffset2D(offset1)
+                outset = w.makeOffset2D(offset2)
+
+                edge_dist = Vector(0, 0, -0.1)
+                cutter = Part.makeFace([outset, inset], "Part::FaceMakerBullseye").extrude(2 * edge_dist)
+                cutter.translate(-edge_dist)
+
+                if cutter.isValid():
+                    working_shape = working_shape.cut(cutter)
+                else:
+                    Console.PrintWarning("Failed to make decorative edge cutter")
+
+            # make the interior cut
+            if fp.SpanEdge2 > 0:
+                valid_cutters = []
+                inset = w.makeOffset2D(-fp.SpanEdge2)
+                if inset.isValid():
+                    cutters = [Part.Face(wire).extrude(Vector(0, 0, -fp.SpanThick * 2.0)) for wire in inset.Wires]
+                    for c in cutters:
+                        if not c.isValid():
+                            Console.PrintWarning(
+                                "Skipping invalid cutter produced by SpanEdge2. Try adjusting this value by a small amount"
+                            )
+                        else:
+                            valid_cutters.append(c)
+                    if valid_cutters:
+                        working_shape = working_shape.cut(valid_cutters)
+                else:
+                    print("Edge not valid")
+                    Console.PrintWarning(
+                        "SpanEdge2 produced an invalid face. No span cut will occur. Try adjusting the number by a small amount"
+                    )
 
         return Part.Solid(working_shape)
 
