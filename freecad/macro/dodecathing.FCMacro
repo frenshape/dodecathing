@@ -5,7 +5,7 @@ from dodecathing.dodecathing import DodecaThing, ViewThing
 if App.ActiveDocument:
     doc = FreeCAD.ActiveDocument
     a = App.ActiveDocument.addObject("Part::FeaturePython","DoDecaThing")
-    b = DodecaThing(a)    
+    b = DodecaThing(a)
     ViewThing(a.ViewObject)
     doc.recompute()
 else:

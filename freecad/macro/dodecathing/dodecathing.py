@@ -2,6 +2,7 @@ import FreeCAD as App
 from FreeCAD import Vector, Units, Console, Rotation, Matrix, Sketcher
 import Part
 import numpy as np
+from datetime import datetime
 
 from dodecathing.sketchutil import SketchUtil, CDir, pairwise
 from dodecathing.dodecahedron import make_dodecahedron_faces, get_opposing_faces
@@ -247,10 +248,43 @@ def make_span_at_origin(fp, sketch):
     return sketch
 
 
+def make_face_edge_cutter(target_face, edge_thickness, outer_only=False):
+    if outer_only:
+        wires = [target_face.OuterWire]
+    else:
+        wires = target_face.Wires
+
+    # Part.show(outer_wire)
+    offset1 = (-edge_thickness) - 0.1
+    offset2 = -edge_thickness
+    # inset
+
+    cutters = []
+    for w in wires:
+        if w.isEqual(target_face.OuterWire):
+            inset = w.makeOffset2D(offset1)
+            # Part.show(inset, "inset")
+            outset = w.makeOffset2D(offset2)
+            # Part.show(outset, "outset")
+        else:
+            inset = w.makeOffset2D(-offset1)
+            # Part.show(inset, "inset")
+            outset = w.makeOffset2D(-offset2)
+
+        edge_dist = -0.1 * target_face.normalAt(0, 0)
+        cutter = Part.makeFace([outset, inset], "Part::FaceMakerBullseye").extrude(2 * edge_dist)
+        # cutter = Part.makeFace([inset], "Part::FaceMakerBullseye").extrude(2 * edge_dist)
+        cutter.translate(-edge_dist)
+        cutters.append(cutter)
+
+    return cutters
+
+
 class DodecaThing:
 
     def __init__(self, obj):
         obj.Proxy = self
+
         obj.addProperty(
             "App::PropertyBool", "MakeAllSpans", "Control", "If true then all spans will be created"
         ).MakeAllSpans = True
@@ -273,6 +307,12 @@ class DodecaThing:
         obj.addProperty(
             "App::PropertyLength", "SpanEdge2", "Decorative", "Second edge thickness for the span"
         ).SpanEdge2 = 3
+        obj.addProperty(
+            "App::PropertyLength", "CornerHoleOffset", "Decorative", "Edge offset for the hole in the corner"
+        ).CornerHoleOffset = 2
+        obj.addProperty(
+            "App::PropertyLength", "CornerHoleDiameter", "Decorative", "Diameter of the hole in the corner"
+        ).CornerHoleDiameter = 8
 
         obj.addProperty("App::PropertyLength", "SpanThick", "SpanDims", "Thickness of the spans").SpanThick = 4.0
         obj.addProperty(
@@ -342,26 +382,35 @@ class DodecaThing:
         pass
 
     def execute(self, fp):
+        Console.PrintMessage("Starting dodecathing execute\n")
         self.update_sketch(fp)
+        Console.PrintMessage("Sketch updated\n")
 
-        if fp.MakeAllSpans:
-            DodecaThing.place_all_spans(fp)
-        else:
-            DodecaThing.place_single_span(fp)
+        make_spans = True
+        if make_spans:
+            Console.PrintMessage("Building spans\n")
+            if fp.MakeAllSpans:
+                DodecaThing.place_all_spans(fp)
+            else:
+                DodecaThing.place_single_span(fp)
 
+        Console.PrintMessage("Building corners\n")
         if fp.MakeAllCorners:
             DodecaThing.place_all_corners(fp)
         else:
             DodecaThing.place_single_corner(fp)
 
+        Console.PrintMessage("Building dodecahedron\n")
         if fp.MakeDodecahedron:
             ddo = DodecaThing.get_dodecahedron_feature(fp)
             ddo.Shape = Part.Solid(Part.Shell(make_dodecahedron_faces(fp.Radius)))
         else:
             DodecaThing.remove_dodecahedron_feature(fp)
+        Console.PrintMessage("Execute complete\n")
 
     @staticmethod
     def update_sketch(fp):
+        Console.PrintMessage("Update_sketch\n")
         sketch = DodecaThing.get_sketch(fp)
         if sketch:
             make_span_at_origin(fp, sketch)
@@ -465,6 +514,7 @@ class DodecaThing:
 
     @staticmethod
     def make_span(fp):
+        Console.PrintMessage("Starting span\n")
         shapes = []
 
         if sketch_obj := DodecaThing.get_sketch(fp):
@@ -512,7 +562,7 @@ class DodecaThing:
                 if cutter.isValid():
                     working_shape = working_shape.cut(cutter)
                 else:
-                    Console.PrintWarning("Failed to make decorative edge cutter")
+                    Console.PrintWarning("Failed to make decorative edge cutter\n")
 
             # make the interior cut
             if fp.SpanEdge2 > 0:
@@ -523,7 +573,7 @@ class DodecaThing:
                     for c in cutters:
                         if not c.isValid():
                             Console.PrintWarning(
-                                "Skipping invalid cutter produced by SpanEdge2. Try adjusting this value by a small amount"
+                                "Skipping invalid cutter produced by SpanEdge2. Try adjusting this value by a small amount\n"
                             )
                         else:
                             valid_cutters.append(c)
@@ -532,9 +582,9 @@ class DodecaThing:
                 else:
                     print("Edge not valid")
                     Console.PrintWarning(
-                        "SpanEdge2 produced an invalid face. No span cut will occur. Try adjusting the number by a small amount"
+                        "SpanEdge2 produced an invalid face. No span cut will occur. Try adjusting the number by a small amount\n"
                     )
-
+        Console.PrintMessage("Finished span\n")
         return Part.Solid(working_shape)
 
     @staticmethod
@@ -566,16 +616,17 @@ class DodecaThing:
 
     @staticmethod
     def make_corner(fp):
+        start_time = datetime.now()
         peak = Vector(0, 0, 0)
 
         # edge angle is defined by
         # edgeAngle = Vector(np.sin(kEdgeToBaseAngleRad), 0, np.cos(kEdgeToBaseAngleRad))
         # to travel the height the vector must be height / cos(kEdgeToBaseAngleRad)
 
-        edgeLength = fp.PyramidHeight / np.cos(kEdgeToBaseAngleRad)
-        pointRadius = edgeLength * np.sin(kEdgeToBaseAngleRad)
+        edge_length = fp.PyramidHeight / np.cos(kEdgeToBaseAngleRad)
+        point_radius = edge_length * np.sin(kEdgeToBaseAngleRad)
 
-        startPt = Vector(pointRadius, 0, -fp.PyramidHeight)
+        startPt = Vector(point_radius, 0, -fp.PyramidHeight)
         base_points = [
             Rotation(Vector(0, 0, 1), Radian=theta) * startPt for theta in np.linspace(0, 2 * np.pi, 5, False)
         ]
@@ -621,7 +672,7 @@ class DodecaThing:
             p = l1.intersect(l2)[0]
             bottom_points.append(Vector(p.X, p.Y, p.Z))
 
-        polyA = Part.makePolygon(base_points)
+        polyA = Part.makePolygon(base_points, True)
         polyB = Part.makePolygon(bottom_points, True)
         loft = Part.makeLoft([polyA, polyB], True)
 
@@ -638,8 +689,59 @@ class DodecaThing:
             dt_shape.transformed(Rotation(Vector(0, 0, 1), Radian=theta).toMatrix())
             for theta in np.linspace(0, 2 * np.pi, 5, False)
         ]
+        pre_dt_cut_time = datetime.now()
         shape = shape.cut(cutters)
-        return Part.Solid(shape)
+        post_dt_cut_time = datetime.now()
+
+        # make hollow
+        hollow_gap = float(fp.CornerHoleOffset)
+        side_hole_radius = float(fp.CornerHoleDiameter / 2)
+
+        if side_hole_radius > 0:
+            side_hole_center = face1_midpoint + face1_up_vector * (float(fp.DoveLength) + hollow_gap + side_hole_radius)
+            c1 = Part.Circle(Vector(0, 0, side_hole_center.z), Vector(-1, 0, 0), side_hole_radius)
+            f = Part.Face(Part.Wire([c1.toShape()]))
+            cutter = f.extrude(Vector(-edge_length, 0, 0))
+            cutters = [
+                cutter.transformed(Rotation(Vector(0, 0, 1), Radian=theta).toMatrix())
+                for theta in np.linspace(0, 2 * np.pi, 5, False)
+            ]
+            shape = shape.cut(cutters)
+            pass
+
+        edge_thickness = float(fp.SpanEdge1)
+        if edge_thickness > 0:
+            # make the decorative outline
+            print(shape)
+            candidate_faces = []
+            for f in shape.Faces:
+                # look for the face that has a normal that is x negative, z positive, and near zero y
+
+                norm = f.normalAt(0, 0)
+                if norm.x < 0 and norm.z > 0 and abs(norm.y) < 0.1:
+                    candidate_faces.append(f)
+
+            # if there's more than one (will occur if dovetails have been added) then pick the highest one
+
+            faces = sorted(candidate_faces, key=lambda x: x.CenterOfMass.z)
+            target_face = faces[-1]
+            edge_cutters = make_face_edge_cutter(target_face, edge_thickness)
+            cutters = []
+            for cutter in edge_cutters:
+                # and make one for each side
+                cutters += [
+                    cutter.transformed(Rotation(Vector(0, 0, 1), Radian=theta).toMatrix())
+                    for theta in np.linspace(0, 2 * np.pi, 5, False)
+                ]
+            # make the holes
+            shape = shape.cut(cutters)
+        solid = Part.Solid(shape)
+        make_corner_finish = datetime.now()
+        # time_a = pre_dt_cut_time - make_corner_finish
+        time_to_cut = post_dt_cut_time - pre_dt_cut_time
+        total_time = make_corner_finish - start_time
+        print(f"Start {start_time} Total: {total_time} DT cut: {time_to_cut}")
+        return solid
 
     @staticmethod
     def place_single_corner(fp):
